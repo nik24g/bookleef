@@ -127,12 +127,19 @@ def _llm_settings():
 
 
 def _llm_client():
+    """Build an OpenAI-compatible client with a hard request timeout.
+
+    20s is well under gunicorn's worker timeout (60s recommended). If the
+    upstream LLM is slow (free tier queueing on OpenRouter, etc.), we raise
+    APITimeoutError instead of letting gunicorn SIGABRT the worker — which
+    would bypass our try/except and return a 500 to the user.
+    """
     api_key, base_url, _ = _llm_settings()
     if not api_key:
         return None
     from openai import OpenAI
 
-    return OpenAI(api_key=api_key, base_url=base_url)
+    return OpenAI(api_key=api_key, base_url=base_url, timeout=20.0)
 
 
 def _parse_json_block(raw: str) -> dict:
