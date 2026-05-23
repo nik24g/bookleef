@@ -6,10 +6,12 @@ Two responsibilities:
 
 Design notes (asked about in interview):
 - API key is read from settings/env only — never sent to the frontend.
+- Provider-agnostic: uses any OpenAI-compatible endpoint (LLM_BASE_URL).
+  Default is OpenRouter (free DeepSeek model); swap by changing env vars.
 - Knowledge base is split per category. We send only the relevant section to
   keep prompts short (cost-conscious).
 - Few-shot examples from the brief calibrate tone and priority.
-- Graceful degradation: if OPENAI_API_KEY is missing or the API call fails,
+- Graceful degradation: if LLM_API_KEY is missing or the API call fails,
   we fall back to keyword rules and a polite generic draft so the ticket flow
   never breaks.
 """
@@ -106,22 +108,47 @@ def _fallback_priority(text: str) -> str:
     return Ticket.Priority.MEDIUM
 
 
-# ---------- OpenAI helpers ----------
+# ---------- LLM client (OpenAI-compatible: OpenRouter / DeepSeek / OpenAI / Groq) ----------
 
-def _openai_client():
-    api_key = getattr(settings, "OPENAI_API_KEY", "") or os.getenv("OPENAI_API_KEY", "")
+def _llm_settings():
+    """Return (api_key, base_url, model) from Django settings (env-driven)."""
+    api_key = getattr(settings, "LLM_API_KEY", "") or os.getenv("LLM_API_KEY", "")
+    base_url = (
+        getattr(settings, "LLM_BASE_URL", "")
+        or os.getenv("LLM_BASE_URL", "")
+        or "https://openrouter.ai/api/v1"
+    )
+    model = (
+        getattr(settings, "LLM_MODEL", "")
+        or os.getenv("LLM_MODEL", "")
+        or "deepseek/deepseek-chat-v3.1:free"
+    )
+    return api_key, base_url, model
+
+
+def _llm_client():
+    api_key, base_url, _ = _llm_settings()
     if not api_key:
         return None
     from openai import OpenAI
 
-    return OpenAI(api_key=api_key)
+    return OpenAI(api_key=api_key, base_url=base_url)
 
 
 def _parse_json_block(raw: str) -> dict:
-    """Extract a JSON object from model output."""
+    """Extract a JSON object from model output (handles markdown fences and prose)."""
     if not raw:
         return {}
-    match = re.search(r"\{.*\}", raw, re.DOTALL)
+    cleaned = raw.strip()
+    # Strip markdown code fences like ```json ... ``` or ``` ... ```
+    fence = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", cleaned, re.DOTALL | re.IGNORECASE)
+    if fence:
+        cleaned = fence.group(1)
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        pass
+    match = re.search(r"\{.*\}", cleaned, re.DOTALL)
     if not match:
         return {}
     try:
@@ -135,12 +162,12 @@ def _parse_json_block(raw: str) -> dict:
 def classify_ticket(subject: str, description: str) -> tuple[str, str]:
     """Return (category, priority) for a new ticket."""
     text = f"{subject}\n{description}"
-    client = _openai_client()
+    client = _llm_client()
     if not client:
-        logger.info("AI classify: no OpenAI key, using fallback rules")
+        logger.info("AI classify: no LLM_API_KEY, using fallback rules")
         return _fallback_category(text), _fallback_priority(text)
 
-    model = getattr(settings, "OPENAI_MODEL", "gpt-4o-mini")
+    _, _, model = _llm_settings()
     valid_categories = [c.value for c in Ticket.Category]
     valid_priorities = [p.value for p in Ticket.Priority]
 
@@ -171,18 +198,28 @@ def classify_ticket(subject: str, description: str) -> tuple[str, str]:
             ],
             temperature=0.1,
             max_tokens=80,
-            response_format={"type": "json_object"},
         )
-        data = _parse_json_block(response.choices[0].message.content or "")
+        raw = response.choices[0].message.content or ""
+        data = _parse_json_block(raw)
         category = data.get("category")
         priority = data.get("priority")
+        used_fallback = False
         if category not in valid_categories:
             category = _fallback_category(text)
+            used_fallback = True
         if priority not in valid_priorities:
             priority = _fallback_priority(text)
+            used_fallback = True
+        if used_fallback:
+            logger.warning(
+                "AI classify: model=%s returned unparseable JSON (raw=%r). Used fallback → %s / %s",
+                model, raw[:300], category, priority,
+            )
+        else:
+            logger.info("AI classify: model=%s → %s / %s", model, category, priority)
         return category, priority
     except Exception as exc:
-        logger.warning("AI classify failed: %s — using fallback", exc)
+        logger.warning("AI classify failed (model=%s): %s — using fallback", model, exc)
         return _fallback_category(text), _fallback_priority(text)
 
 
@@ -225,12 +262,12 @@ def _generic_draft(ticket) -> str:
 
 def draft_response(ticket) -> str:
     """Draft a reply for the admin to review and edit before sending."""
-    client = _openai_client()
+    client = _llm_client()
     if not client:
-        logger.info("AI draft: no OpenAI key, using generic template")
+        logger.info("AI draft: no LLM_API_KEY, using generic template")
         return _generic_draft(ticket)
 
-    model = getattr(settings, "OPENAI_MODEL", "gpt-4o-mini")
+    _, _, model = _llm_settings()
     author_name = ticket.author.user.get_full_name() or ticket.author.user.first_name or "Author"
 
     # Send only the policy section relevant to this category — saves tokens.

@@ -62,17 +62,19 @@ class AuthorTicketListCreateView(generics.ListCreateAPIView):
     def perform_create(self, serializer):
         profile = self.request.user.author_profile
         ticket = serializer.save(author=profile)
-        category, priority = ai_service.classify_ticket(ticket.subject, ticket.description)
-        ticket.category = category
-        ticket.priority = priority
-        ticket = Ticket.objects.select_related("book", "author__user").get(pk=ticket.pk)
+        ticket.category, ticket.priority = ai_service.classify_ticket(
+            ticket.subject, ticket.description
+        )
+        print("ticket.category:", ticket.category)
+        print("ticket.priority:", ticket.priority)
         ticket.ai_draft_response = ai_service.draft_response(ticket)
-        ticket.save()
+        ticket.save(update_fields=["category", "priority", "ai_draft_response", "updated_at"])
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         self.perform_create(serializer)
+        serializer.instance.refresh_from_db()
         return Response(TicketListSerializer(serializer.instance).data, status=status.HTTP_201_CREATED)
 
 

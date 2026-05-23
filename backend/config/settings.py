@@ -105,5 +105,8 @@ SPECTACULAR_SETTINGS = {
     "VERSION": "1.0.0",
 }
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+# LLM provider — any OpenAI-compatible endpoint (OpenRouter, DeepSeek, OpenAI, Groq, etc.)
+# Default points at OpenRouter with a free DeepSeek model so the demo works on a free tier.
+LLM_API_KEY = os.getenv("LLM_API_KEY", "")
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://openrouter.ai/api/v1")
+LLM_MODEL = os.getenv("LLM_MODEL", "deepseek/deepseek-r1-0528")
